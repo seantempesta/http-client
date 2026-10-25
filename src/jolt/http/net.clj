@@ -533,26 +533,36 @@
     :else               (conn-ex "java.net.SocketException"
                                   (str "recv failed (errno " err ")"))))
 
+(def ^:private msg-dontwait
+  "recv's MSG_DONTWAIT: this one call does not block, whatever the socket's mode."
+  (if macos? 0x80 0x40))
+
 (defn recv-bytes
   "Read up to one bufferful from `fd`: a byte-array, nil at EOF (recv 0), or a
   thrown exception classed by errno (see recv-err-ex). Waits for readability
   in interruptible slices first (await-readable!), so a cancelled caller's
   thread comes back within `interrupt-slice-ms` rather than after the socket
-  timeout."
+  timeout. On a fiber the recv does not block (MSG_DONTWAIT): the poller may wake
+  a waiter with nothing to read (a stale registration), and a blocking recv would
+  then hold the carrier; it answers EAGAIN, and the fiber waits again."
   [fd]
-  (let [buf (ffi/alloc bufsize)]
+  (let [buf (ffi/alloc bufsize)
+        fiber? (and (not windows?) (jolt.host/fiber?))]
     (try
       (loop []
         (await-readable! fd)
         ;; :capture-native-error returns [result code]: the code is errno on
         ;; POSIX and the WSA error on Windows, so recv-err-ex's classes hold on
         ;; both without the read having to consult a separate errno.
-        (let [[got err] (c-recv fd buf bufsize 0)]
+        (let [[got err] (c-recv fd buf bufsize (if fiber? msg-dontwait 0))]
           (cond
             (pos? got) (ffi/read-array buf got)
             (zero? got) nil
             ;; a signal is not the peer going away; the read is simply owed again
             (= err eintr) (recur)
+            ;; on a fiber, EAGAIN is nothing to read yet, never the socket's timeout (the
+            ;; poller's deadline is that): wait again
+            (and fiber? (= err eagain)) (recur)
             :else (throw (recv-err-ex err)))))
       (finally (ffi/free buf)))))
 

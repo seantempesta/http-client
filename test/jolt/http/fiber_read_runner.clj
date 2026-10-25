@@ -20,13 +20,18 @@
                         served (binding [a/*go-backend* :fiber]
                                  (a/go (let [in (.getInputStream s) b (byte-array 64)]
                                          (.read in b 0 64)
-                                         (.write (.getOutputStream s) (.getBytes "pong" "UTF-8") 0 4)
+                                         (.write (.getOutputStream s) (.getBytes "po" "UTF-8") 0 2)
+                                         ;; the second half later: the client's second read waits
+                                         ;; again, where its first wait's registration may wake it
+                                         ;; with nothing to read yet
+                                         (a/<! (a/timeout 50))
+                                         (.write (.getOutputStream s) (.getBytes "ng" "UTF-8") 0 2)
                                          :served)))]
                     (net/send-bytes fd (.getBytes "ping" "UTF-8"))
-                    (let [r (net/recv-bytes fd)]
+                    (let [r1 (net/recv-bytes fd) r2 (net/recv-bytes fd)]
                       (a/<!! served)
                       (net/close fd) (.close s) (.close ss)
-                      (String. ^bytes r "UTF-8")))))]
+                      (str (String. ^bytes r1 "UTF-8") (String. ^bytes r2 "UTF-8"))))))]
       (deliver outcome got)
       (if (= "pong" got)
         (do (println "FIBER-READ OK") (flush) (System/exit 0))
