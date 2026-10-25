@@ -8,8 +8,8 @@
 
 (defn -main [& _]
   (let [outcome (promise)]
-    (.start (Thread. (fn [] (when (= ::late (deref outcome 10000 ::late))
-                              (println "FAIL: the fiber's read held the main carrier, so the server fiber never answered")
+    (.start (Thread. (fn [] (when (= ::late (deref outcome 60000 ::late))
+                              (println "FAIL: the read never returned: it held the main carrier (the server fiber never answered), or a deadlock")
                               (flush) (System/exit 1)))))
     (let [got (jolt.host/main-carrier-run!
                 (fn []

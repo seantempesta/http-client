@@ -483,21 +483,21 @@
         (finally (ffi/free tv) (ffi/free len))))))
 
 (defn- await-readable!
-  "Park until `fd` has something to read (or has hung up — recv decides which):
-  on a fiber, through jolt.io-poller (the fiber parks, its carrier runs others); on a
-  thread, in `interrupt-slice-ms` slices. Throws InterruptedException if the thread was
-  interrupted between slices, SocketTimeoutException once the socket's own read
-  timeout has elapsed with nothing to read."
-  [fd]
-  (let [timeout  (read-timeout-ms fd)
-        deadline (when (pos? timeout) (+ (System/currentTimeMillis) timeout))]
-    (if (jolt.host/fiber?)
-      ;; On a fiber the wait parks the fiber, not its carrier thread (jolt.io-poller): a poll here
-      ;; held the carrier, and on a main-carrier process (one thread runs every fiber) a server
-      ;; fiber in the same process could never answer the read. The poller's deadline is the
-      ;; socket's read timeout; an interrupt of a fiber ends its wait by the poller's cancel.
-      (when (= :timeout (poller/wait-ready fd :read (when (pos? timeout) (poller/deadline-ms timeout))))
-        (conn-ex "java.net.SocketTimeoutException" "Read timed out"))
+  "Park until `fd` has something to read (or has hung up — recv decides which), or
+  `deadline` (wall-clock ms, nil for none: the socket's read timeout, fixed once per
+  read by recv-bytes) passes: on a fiber (fiber?), through jolt.io-poller (the fiber
+  parks, its carrier runs others); on a thread, in `interrupt-slice-ms` slices.
+  Throws InterruptedException if the thread was interrupted between slices (a fiber's
+  interrupt raises when it resumes), SocketTimeoutException once the deadline passed
+  with nothing to read."
+  [fd fiber? deadline]
+  (if fiber?
+    ;; On a fiber the wait parks the fiber, not its carrier thread: a poll here held the
+    ;; carrier, and on a main-carrier process (one thread runs every fiber) a server fiber in
+    ;; the same process could never answer the read
+    (when (or (and deadline (>= (System/currentTimeMillis) deadline))
+              (= :timeout (poller/wait-ready fd :read (when deadline (poller/deadline-ms (- deadline (System/currentTimeMillis)))))))
+      (conn-ex "java.net.SocketTimeoutException" "Read timed out"))
     (loop []
       (when (Thread/interrupted)
         (conn-ex "java.lang.InterruptedException" "read interrupted"))
@@ -516,7 +516,7 @@
           ;; errno on POSIX, the WSA code on Windows — so it matches this
           ;; platform's eintr without a second, racy errno read.
           (= err eintr) (recur)
-          :else (conn-ex "java.io.IOException" (str "poll failed (code " err ")"))))))))
+          :else (conn-ex "java.io.IOException" (str "poll failed (code " err ")")))))))
 
 (defn- recv-err-ex
   "The exception a negative recv deserves, classed by what actually failed:
@@ -544,13 +544,16 @@
   thread comes back within `interrupt-slice-ms` rather than after the socket
   timeout. On a fiber the recv does not block (MSG_DONTWAIT): the poller may wake
   a waiter with nothing to read (a stale registration), and a blocking recv would
-  then hold the carrier; it answers EAGAIN, and the fiber waits again."
+  then hold the carrier; it answers EAGAIN, and the fiber waits again, to the same
+  deadline. Windows has no MSG_DONTWAIT, so a fiber there reads as a thread does."
   [fd]
   (let [buf (ffi/alloc bufsize)
-        fiber? (and (not windows?) (jolt.host/fiber?))]
+        fiber? (and (not windows?) (jolt.host/fiber?))
+        timeout (read-timeout-ms fd)
+        deadline (when (pos? timeout) (+ (System/currentTimeMillis) timeout))]
     (try
       (loop []
-        (await-readable! fd)
+        (await-readable! fd fiber? deadline)
         ;; :capture-native-error returns [result code]: the code is errno on
         ;; POSIX and the WSA error on Windows, so recv-err-ex's classes hold on
         ;; both without the read having to consult a separate errno.
