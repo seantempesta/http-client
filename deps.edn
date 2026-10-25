@@ -103,6 +103,10 @@
            ;; servers on their own ports.
            :timeouttest {:extra-paths ["test"]
                          :main-opts ["-m" "jolt.http.timeout-runner"]}
+           ;; a read from a fiber on a main-carrier process (one thread runs every fiber). Its own
+           ;; process: main-carrier-run! comes before the first fiber
+           :fibertest {:extra-paths ["test"]
+                       :main-opts ["-m" "jolt.http.fiber-read-runner"]}
            ;; babashka.http-client, unmodified from Maven, over the java.net.http
            ;; shim. jolt-lang/multipart parses the multipart bodies the client
            ;; builds, so the test asserts on the parts rather than on a byte blob.
@@ -128,4 +132,5 @@
          bhctest "jolt -M:bhctest"
          wstest "jolt -M:wstest"
          tlstest "jolt -M:tlstest"
-         timeouttest "jolt -M:timeouttest"}}
+         timeouttest "jolt -M:timeouttest"
+         fibertest "jolt -M:fibertest"}}

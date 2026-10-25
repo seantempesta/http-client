@@ -11,6 +11,7 @@
   accept/recv/send/connect/getaddrinfo are marked :blocking so a parked socket
   call never pins jolt's stop-the-world collector."
   (:require [jolt.ffi :as ffi]
+            [jolt.io-poller :as poller]
             [clojure.string :as str]))
 
 (def ^:private os-name
@@ -482,13 +483,21 @@
         (finally (ffi/free tv) (ffi/free len))))))
 
 (defn- await-readable!
-  "Park until `fd` has something to read (or has hung up — recv decides which),
-  in `interrupt-slice-ms` slices. Throws InterruptedException if the thread was
+  "Park until `fd` has something to read (or has hung up — recv decides which):
+  on a fiber, through jolt.io-poller (the fiber parks, its carrier runs others); on a
+  thread, in `interrupt-slice-ms` slices. Throws InterruptedException if the thread was
   interrupted between slices, SocketTimeoutException once the socket's own read
   timeout has elapsed with nothing to read."
   [fd]
   (let [timeout  (read-timeout-ms fd)
         deadline (when (pos? timeout) (+ (System/currentTimeMillis) timeout))]
+    (if (jolt.host/fiber?)
+      ;; On a fiber the wait parks the fiber, not its carrier thread (jolt.io-poller): a poll here
+      ;; held the carrier, and on a main-carrier process (one thread runs every fiber) a server
+      ;; fiber in the same process could never answer the read. The poller's deadline is the
+      ;; socket's read timeout; an interrupt of a fiber ends its wait by the poller's cancel.
+      (when (= :timeout (poller/wait-ready fd :read (when (pos? timeout) (poller/deadline-ms timeout))))
+        (conn-ex "java.net.SocketTimeoutException" "Read timed out"))
     (loop []
       (when (Thread/interrupted)
         (conn-ex "java.lang.InterruptedException" "read interrupted"))
@@ -507,7 +516,7 @@
           ;; errno on POSIX, the WSA code on Windows — so it matches this
           ;; platform's eintr without a second, racy errno read.
           (= err eintr) (recur)
-          :else (conn-ex "java.io.IOException" (str "poll failed (code " err ")")))))))
+          :else (conn-ex "java.io.IOException" (str "poll failed (code " err ")"))))))))
 
 (defn- recv-err-ex
   "The exception a negative recv deserves, classed by what actually failed:
